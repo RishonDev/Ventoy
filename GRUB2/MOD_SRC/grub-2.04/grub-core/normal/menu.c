@@ -951,12 +951,12 @@ run_menu (grub_menu_t menu, int nested, int *auto_boot)
             menu_fini ();
             if (g_ventoy_terminal_output == 0)
             {
-                grub_script_execute_sourcecode("terminal_output console");
+                grub_script_execute_sourcecode("vt_push_menu_lang en_US\nterminal_output console");
                 g_ventoy_terminal_output = 1;
             }
             else
             {
-                grub_script_execute_sourcecode("terminal_output gfxterm");
+                grub_script_execute_sourcecode("terminal_output gfxterm\nvt_pop_menu_lang");
                 g_ventoy_terminal_output = 0;
             }
             goto refresh;
@@ -1133,6 +1133,7 @@ show_menu (grub_menu_t menu, int nested, int autobooted)
     
   while (1)
     {
+      int ndown;
       int boot_entry;
       grub_menu_entry_t e;
       int auto_boot;
@@ -1175,6 +1176,16 @@ show_menu (grub_menu_t menu, int nested, int autobooted)
 
       if (2 == e->argc && e->args && e->args[1] && grub_strncmp(e->args[1], "VTOY_RUN_RET", 12) == 0)
         break; 
+      else if (2 == e->argc && e->args && e->args[1] && grub_strncmp(e->args[1], "VTOY_RUN_SET", 12) == 0) {        
+        ndown = (int)grub_strtol(e->args[1] + 12, NULL, 10);
+        while (ndown > 0)
+        {
+            ventoy_menu_push_key(GRUB_TERM_KEY_DOWN);
+            ndown--;
+        }
+        ventoy_menu_push_key('\n');
+        break;         
+      }
     }
 
   return GRUB_ERR_NONE;

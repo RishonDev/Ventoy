@@ -139,7 +139,7 @@ static DWORD GetVentoyVolumeName(int PhyDrive, UINT64 StartSectorId, CHAR *NameB
     return Status;
 }
 
-static int GetLettersBelongPhyDrive(int PhyDrive, char *DriveLetters, size_t Length)
+int GetLettersBelongPhyDrive(int PhyDrive, char *DriveLetters, size_t Length)
 {
     int n = 0;
     DWORD DataSize = 0;
@@ -355,6 +355,7 @@ int GetAllPhysicalDriveInfo(PHY_DRIVE_INFO *pDriveList, DWORD *pDriveCount)
     STORAGE_PROPERTY_QUERY Query;
     STORAGE_DESCRIPTOR_HEADER DevDescHeader;
     STORAGE_DEVICE_DESCRIPTOR *pDevDesc;
+    STORAGE_ACCESS_ALIGNMENT_DESCRIPTOR diskAlignment;
     int PhyDriveId[VENTOY_MAX_PHY_DRIVE];
 
     Count = GetPhysicalDriveCount();
@@ -468,11 +469,34 @@ int GetAllPhysicalDriveInfo(PHY_DRIVE_INFO *pDriveList, DWORD *pDriveCount)
             continue;
         }
 
+
+
+        memset(&Query, 0, sizeof(STORAGE_PROPERTY_QUERY));
+        Query.PropertyId = StorageAccessAlignmentProperty;
+        Query.QueryType = PropertyStandardQuery;
+        memset(&diskAlignment, 0, sizeof(STORAGE_ACCESS_ALIGNMENT_DESCRIPTOR));
+
+        bRet = DeviceIoControl(Handle,
+                               IOCTL_STORAGE_QUERY_PROPERTY,
+                               &Query,
+                               sizeof(STORAGE_PROPERTY_QUERY),
+                               &diskAlignment,
+                               sizeof(STORAGE_ACCESS_ALIGNMENT_DESCRIPTOR),
+                               &dwBytes,
+                               NULL);
+        if (!bRet)
+        {
+            Log("DeviceIoControl3 error:%u dwBytes:%u", LASTERR, dwBytes);            
+        }
+
         CurDrive->PhyDrive = i;
         CurDrive->SizeInBytes = LengthInfo.Length.QuadPart;
         CurDrive->DeviceType = pDevDesc->DeviceType;
         CurDrive->RemovableMedia = pDevDesc->RemovableMedia;
         CurDrive->BusType = pDevDesc->BusType;
+
+        CurDrive->BytesPerLogicalSector = diskAlignment.BytesPerLogicalSector;
+        CurDrive->BytesPerPhysicalSector = diskAlignment.BytesPerPhysicalSector;
 
         if (pDevDesc->VendorIdOffset)
         {
@@ -508,9 +532,10 @@ int GetAllPhysicalDriveInfo(PHY_DRIVE_INFO *pDriveList, DWORD *pDriveCount)
 
     for (i = 0, CurDrive = pDriveList; i < (int)DriveCount; i++, CurDrive++)
     {
-        Log("PhyDrv:%d BusType:%-4s Removable:%u Size:%dGB(%llu) Name:%s %s",
+        Log("PhyDrv:%d BusType:%-4s Removable:%u Size:%dGB(%llu) Sector:%u/%u Name:%s %s",
             CurDrive->PhyDrive, GetBusTypeString(CurDrive->BusType), CurDrive->RemovableMedia,
             GetHumanReadableGBSize(CurDrive->SizeInBytes), CurDrive->SizeInBytes,
+            CurDrive->BytesPerLogicalSector, CurDrive->BytesPerPhysicalSector,
             CurDrive->VendorId, CurDrive->ProductId);
     }
 
@@ -519,6 +544,199 @@ int GetAllPhysicalDriveInfo(PHY_DRIVE_INFO *pDriveList, DWORD *pDriveCount)
     return 0;
 }
 
+BOOL VentoyPhydriveMatch(PHY_DRIVE_INFO* pPhyDrive)
+{
+    BOOL  bRet = FALSE;
+    DWORD dwBytes;
+    HANDLE Handle = INVALID_HANDLE_VALUE;
+    CHAR PhyDrive[128];
+    GET_LENGTH_INFORMATION LengthInfo;
+    STORAGE_PROPERTY_QUERY Query;
+    STORAGE_DESCRIPTOR_HEADER DevDescHeader;
+    STORAGE_DEVICE_DESCRIPTOR* pDevDesc = NULL;
+    STORAGE_ACCESS_ALIGNMENT_DESCRIPTOR diskAlignment;
+    CHAR VendorId[128] = { 0 };
+    CHAR ProductId[128] = { 0 };
+    CHAR ProductRev[128] = { 0 };
+    CHAR SerialNumber[128] = { 0 };
+
+
+    safe_sprintf(PhyDrive, "\\\\.\\PhysicalDrive%d", pPhyDrive->PhyDrive);
+    Handle = CreateFileA(PhyDrive, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (Handle == INVALID_HANDLE_VALUE)
+    {
+        Log("Create file Handle:%p %s status:%u", Handle, PhyDrive, LASTERR);
+        return FALSE;
+    }
+
+    bRet = DeviceIoControl(Handle,
+        IOCTL_DISK_GET_LENGTH_INFO, NULL,
+        0,
+        &LengthInfo,
+        sizeof(LengthInfo),
+        &dwBytes,
+        NULL);
+    if (!bRet)
+    {
+        Log("DeviceIoControl IOCTL_DISK_GET_LENGTH_INFO failed error:%u", LASTERR);
+        return FALSE;
+    }
+
+    if (pPhyDrive->SizeInBytes != (ULONGLONG)LengthInfo.Length.QuadPart)
+    {
+        Log("PHYSICALDRIVE%d size not match %llu %llu", pPhyDrive->PhyDrive, (ULONGLONG)LengthInfo.Length.QuadPart,
+            (ULONGLONG)pPhyDrive->SizeInBytes);
+        CHECK_CLOSE_HANDLE(Handle);
+        return FALSE;
+    }
+
+    Query.PropertyId = StorageDeviceProperty;
+    Query.QueryType = PropertyStandardQuery;
+
+    bRet = DeviceIoControl(Handle,
+        IOCTL_STORAGE_QUERY_PROPERTY,
+        &Query,
+        sizeof(Query),
+        &DevDescHeader,
+        sizeof(STORAGE_DESCRIPTOR_HEADER),
+        &dwBytes,
+        NULL);
+    if (!bRet)
+    {
+        Log("DeviceIoControl1 error:%u dwBytes:%u", LASTERR, dwBytes);
+        CHECK_CLOSE_HANDLE(Handle);
+        return FALSE;
+    }
+
+    if (DevDescHeader.Size < sizeof(STORAGE_DEVICE_DESCRIPTOR))
+    {
+        Log("Invalid DevDescHeader.Size:%u", DevDescHeader.Size);
+        CHECK_CLOSE_HANDLE(Handle);
+        return FALSE;
+    }
+
+    pDevDesc = (STORAGE_DEVICE_DESCRIPTOR*)malloc(DevDescHeader.Size);
+    if (!pDevDesc)
+    {
+        Log("failed to malloc error:%u len:%u", LASTERR, DevDescHeader.Size);
+        CHECK_CLOSE_HANDLE(Handle);
+        return FALSE;
+    }
+
+    bRet = DeviceIoControl(Handle,
+        IOCTL_STORAGE_QUERY_PROPERTY,
+        &Query,
+        sizeof(Query),
+        pDevDesc,
+        DevDescHeader.Size,
+        &dwBytes,
+        NULL);
+    if (!bRet)
+    {
+        Log("DeviceIoControl2 error:%u dwBytes:%u", LASTERR, dwBytes);
+        free(pDevDesc);
+        goto out;
+    }
+
+
+
+    memset(&Query, 0, sizeof(STORAGE_PROPERTY_QUERY));
+    Query.PropertyId = StorageAccessAlignmentProperty;
+    Query.QueryType = PropertyStandardQuery;
+    memset(&diskAlignment, 0, sizeof(STORAGE_ACCESS_ALIGNMENT_DESCRIPTOR));
+
+    bRet = DeviceIoControl(Handle,
+        IOCTL_STORAGE_QUERY_PROPERTY,
+        &Query,
+        sizeof(STORAGE_PROPERTY_QUERY),
+        &diskAlignment,
+        sizeof(STORAGE_ACCESS_ALIGNMENT_DESCRIPTOR),
+        &dwBytes,
+        NULL);
+    if (!bRet)
+    {
+        Log("DeviceIoControl3 error:%u dwBytes:%u", LASTERR, dwBytes);
+    }
+
+    if (pPhyDrive->DeviceType != pDevDesc->DeviceType ||
+        pPhyDrive->RemovableMedia != pDevDesc->RemovableMedia ||
+        pPhyDrive->BusType != pDevDesc->BusType ||
+        pPhyDrive->BytesPerLogicalSector != diskAlignment.BytesPerLogicalSector ||
+        pPhyDrive->BytesPerPhysicalSector != diskAlignment.BytesPerPhysicalSector
+        )
+    {
+        Log("Some properties not match DeviceType[%u %u] Removable[%u %u] BusType[%u %u] LogSec[%u %u] PhySec[%u %u]", 
+            pPhyDrive->DeviceType, pDevDesc->DeviceType,
+            pPhyDrive->RemovableMedia, pDevDesc->RemovableMedia,
+            pPhyDrive->BusType, pDevDesc->BusType,
+            pPhyDrive->BytesPerLogicalSector, diskAlignment.BytesPerLogicalSector,
+            pPhyDrive->BytesPerPhysicalSector, diskAlignment.BytesPerPhysicalSector
+            );
+        goto out;
+    }
+
+    if (pDevDesc->VendorIdOffset)
+    {
+        safe_strcpy(VendorId, (char*)pDevDesc + pDevDesc->VendorIdOffset);
+        TrimString(VendorId);
+
+        if (strcmp(pPhyDrive->VendorId, VendorId))
+        {
+            Log("VendorId not match <%s %s>", pPhyDrive->VendorId, VendorId);
+            goto out;
+        }
+    }
+
+    if (pDevDesc->ProductIdOffset)
+    {
+        safe_strcpy(ProductId, (char*)pDevDesc + pDevDesc->ProductIdOffset);
+        TrimString(ProductId);
+
+        if (strcmp(pPhyDrive->ProductId, ProductId))
+        {
+            Log("ProductId not match <%s %s>", pPhyDrive->ProductId, ProductId);
+            goto out;
+        }
+    }
+
+    if (pDevDesc->ProductRevisionOffset)
+    {
+        safe_strcpy(ProductRev, (char*)pDevDesc + pDevDesc->ProductRevisionOffset);
+        TrimString(ProductRev);
+
+        if (strcmp(pPhyDrive->ProductRev, ProductRev))
+        {
+            Log("ProductRev not match <%s %s>", pPhyDrive->ProductRev, ProductRev);
+            goto out;
+        }
+    }
+
+    if (pDevDesc->SerialNumberOffset)
+    {
+        safe_strcpy(SerialNumber, (char*)pDevDesc + pDevDesc->SerialNumberOffset);
+        TrimString(SerialNumber);
+
+        if (strcmp(pPhyDrive->SerialNumber, SerialNumber))
+        {
+            Log("ProductRev not match <%s %s>", pPhyDrive->SerialNumber, SerialNumber);
+            goto out;
+        }
+    }
+
+    Log("PhyDrive%d ALL match, now continue", pPhyDrive->PhyDrive);
+
+    bRet = TRUE;
+
+out:
+    if (pDevDesc)
+    {
+        free(pDevDesc);
+    }
+
+    CHECK_CLOSE_HANDLE(Handle);
+
+    return bRet;
+}
 
 static HANDLE g_FatPhyDrive;
 static UINT64 g_Part2StartSec;
@@ -725,12 +943,13 @@ int VentoyProcSecureBoot(BOOL SecureBoot)
 			fl_fclose(file);
 
 			Log("Now delete all efi files ...");
-			fl_remove("/EFI/BOOT/BOOTX64.EFI");
-			fl_remove("/EFI/BOOT/grubx64.efi");
+            fl_remove("/EFI/BOOT/BOOTX64.EFI");            
+            fl_remove("/EFI/BOOT/grubx64.efi");            
 			fl_remove("/EFI/BOOT/grubx64_real.efi");
 			fl_remove("/EFI/BOOT/MokManager.efi");
 			fl_remove("/EFI/BOOT/mmx64.efi");
             fl_remove("/ENROLL_THIS_KEY_IN_MOKMANAGER.cer");
+            fl_remove("/EFI/BOOT/grub.efi");
 
 			file = fl_fopen("/EFI/BOOT/BOOTX64.EFI", "wb");
 			Log("Open bootx64 efi file %p ", file);
@@ -1224,7 +1443,45 @@ static int FormatPart1exFAT(UINT64 DiskSizeBytes)
     }
 }
 
+static int ZeroPart1FileSystem(HANDLE hDrive, UINT64 Part2StartSector)
+{
+    int i;
+    DWORD dwSize = 0;
+    LARGE_INTEGER liCurPos;
+    LARGE_INTEGER liNewPos;
+    CHAR TmpBuffer[1024] = { 0 };
 
+    liCurPos.QuadPart = VENTOY_PART1_START_SECTOR * 512;
+    liNewPos.QuadPart = 0;
+    if (0 == SetFilePointerEx(hDrive, liCurPos, &liNewPos, FILE_BEGIN) ||
+        liNewPos.QuadPart != liCurPos.QuadPart)
+    {
+        Log("SetFilePointerEx Failed %u %llu %llu", LASTERR, (ULONGLONG)liCurPos.QuadPart, (ULONGLONG)liNewPos.QuadPart);
+        return 1;
+    }
+
+    for (i = 0; i < 1024; i++)
+    {
+        WriteFile(hDrive, TmpBuffer, 1024, &dwSize, NULL);
+    }
+
+    liCurPos.QuadPart = (Part2StartSector * 512) - (1024 * 1024);
+    liNewPos.QuadPart = 0;
+    if (0 == SetFilePointerEx(hDrive, liCurPos, &liNewPos, FILE_BEGIN) ||
+        liNewPos.QuadPart != liCurPos.QuadPart)
+    {
+        Log("SetFilePointerEx Failed %u %llu %llu", LASTERR, (ULONGLONG)liCurPos.QuadPart, (ULONGLONG)liNewPos.QuadPart);
+        return 1;
+    }
+
+    for (i = 0; i < 1024; i++)
+    {
+        WriteFile(hDrive, TmpBuffer, 1024, &dwSize, NULL);
+    }
+
+    Log("Zero Part1 SUCCESS");
+    return 0;
+}
 
 int ClearVentoyFromPhyDrive(HWND hWnd, PHY_DRIVE_INFO *pPhyDrive, char *pDrvLetter)
 {
@@ -1548,7 +1805,7 @@ int InstallVentoy2FileImage(PHY_DRIVE_INFO *pPhyDrive, int PartStyle)
         memset(pData, 0, 512);
 
         pMBR = (MBR_HEAD *)pData;
-        VentoyFillMBR(pPhyDrive->SizeInBytes, pMBR, PartStyle);
+        VentoyFillMBR(pPhyDrive->SizeInBytes, pMBR, PartStyle, 0x07);
         Part1StartSector = pMBR->PartTbl[0].StartSectorId;
         Part1SectorCount = pMBR->PartTbl[0].SectorCount;
         Part2StartSector = pMBR->PartTbl[1].StartSectorId;
@@ -1698,6 +1955,7 @@ int InstallVentoy2PhyDrive(PHY_DRIVE_INFO *pPhyDrive, int PartStyle, int TryId)
     int i;
     int rc = 0;
     int state = 0;
+    BOOL ReformatOK;
     HANDLE hDrive;
     DWORD dwSize;
     BOOL bRet;
@@ -1710,6 +1968,8 @@ int InstallVentoy2PhyDrive(PHY_DRIVE_INFO *pPhyDrive, int PartStyle, int TryId)
     UINT64 Part1SectorCount = 0;
     UINT64 Part2StartSector = 0;
     BOOL LargeFAT32 = FALSE;
+    BOOL DefaultExFAT = FALSE;
+    UINT8 FsFlag = 0x07;
 
 	Log("#####################################################");
     Log("InstallVentoy2PhyDrive try%d %s PhyDrive%d <<%s %s %dGB>>", TryId,
@@ -1734,7 +1994,12 @@ int InstallVentoy2PhyDrive(PHY_DRIVE_INFO *pPhyDrive, int PartStyle, int TryId)
     }
     else
     {
-        VentoyFillMBR(pPhyDrive->SizeInBytes, &MBR, PartStyle);
+        if (GetVentoyFsType() == VTOY_FS_FAT32)
+        {
+            FsFlag = 0x0C;
+        }
+
+        VentoyFillMBR(pPhyDrive->SizeInBytes, &MBR, PartStyle, FsFlag);
         Part1StartSector = MBR.PartTbl[0].StartSectorId;
         Part1SectorCount = MBR.PartTbl[0].SectorCount;
         Part2StartSector = MBR.PartTbl[1].StartSectorId;
@@ -1822,9 +2087,10 @@ int InstallVentoy2PhyDrive(PHY_DRIVE_INFO *pPhyDrive, int PartStyle, int TryId)
             goto End;
         }
     }
-    else
+    else if (GetVentoyFsType() == VTOY_FS_EXFAT && GetClusterSize() == 0)
     {
         Log("Formatting part1 exFAT ...");
+        DefaultExFAT = TRUE;
         if (0 != FormatPart1exFAT(pPhyDrive->SizeInBytes))
         {
             Log("FormatPart1exFAT failed.");
@@ -1832,7 +2098,16 @@ int InstallVentoy2PhyDrive(PHY_DRIVE_INFO *pPhyDrive, int PartStyle, int TryId)
             goto End;
         }
     }
-    
+    else
+    {
+        Log("Zero part1 file system ...");
+        if (0 != ZeroPart1FileSystem(hDrive, Part2StartSector))
+        {
+            Log("ZeroPart1FileSystem failed.");
+            rc = 1;
+            goto End;
+        }
+    }
 
     PROGRESS_BAR_SET_POS(PT_FORMAT_PART2);
     Log("Writing part2 FAT img ...");
@@ -1956,6 +2231,12 @@ End:
             }
         }
 
+        // close handle, or it will deny reformat
+        Log("Close handle ...");
+        CHECK_CLOSE_HANDLE(hDrive);
+
+        ReformatOK = TRUE;
+
         if (state)
         {
             if (LargeFAT32)
@@ -1963,27 +2244,68 @@ End:
                 Log("No need to reformat for large FAT32");
                 pPhyDrive->VentoyFsClusterSize = GetVolumeClusterSize(MountDrive);
             }
-            else if (DISK_FormatVolume(MountDrive, GetVentoyFsType(), Part1SectorCount * 512))
+            else if (DefaultExFAT)
             {
-                Log("Reformat %C:\\ to %s SUCCESS", MountDrive, GetVentoyFsName());
+                Log("No need to reformat for default exfat");
                 pPhyDrive->VentoyFsClusterSize = GetVolumeClusterSize(MountDrive);
-
-                if ((GetVentoyFsType() != VTOY_FS_UDF) && (pPhyDrive->VentoyFsClusterSize < 2048))
-                {
-                    for (i = 0; i < 10; i++)
-                    {
-                        Log("### Invalid cluster size %d ###", pPhyDrive->VentoyFsClusterSize);
-                    }                    
-                }
             }
             else
             {
-                Log("Reformat %C:\\ to %s FAILED", MountDrive, GetVentoyFsName());
+                bRet = DISK_FormatVolume(MountDrive, GetVentoyFsType(), Part1SectorCount * 512);
+                for (i = 0; bRet == FALSE && i < 2; i++)
+                {
+                    Log("Wait and retry reformat ...");
+                    Sleep(1000);
+                    bRet = DISK_FormatVolume(MountDrive, GetVentoyFsType(), Part1SectorCount * 512);
+                }
+
+                if (bRet)
+                {
+                    Log("Reformat %C:\\ to %s SUCCESS", MountDrive, GetVentoyFsName());
+                    pPhyDrive->VentoyFsClusterSize = GetVolumeClusterSize(MountDrive);
+
+                    if ((GetVentoyFsType() != VTOY_FS_UDF) && (pPhyDrive->VentoyFsClusterSize < 2048))
+                    {
+                        for (i = 0; i < 10; i++)
+                        {
+                            Log("### Invalid cluster size %d ###", pPhyDrive->VentoyFsClusterSize);
+                        }
+                    }
+                }
+                else
+                {
+                    ReformatOK = FALSE;
+                    Log("Reformat %C:\\ to %s FAILED", MountDrive, GetVentoyFsName());
+                }
             }
         }
         else
         {
             Log("Can not reformat %s to %s", DriveName, GetVentoyFsName());
+        }
+
+        if (!ReformatOK)
+        {
+            Log("Format to exfat with built-in algorithm");
+
+            hDrive = GetPhysicalHandle(pPhyDrive->PhyDrive, TRUE, TRUE, FALSE);
+            if (hDrive == INVALID_HANDLE_VALUE)
+            {
+                Log("Failed to GetPhysicalHandle for write.");
+            }
+            else
+            {
+                if (0 != FormatPart1exFAT(pPhyDrive->SizeInBytes))
+                {
+                    Log("FormatPart1exFAT SUCCESS.");
+                }
+                else
+                {
+                    Log("FormatPart1exFAT FAILED.");
+                }
+
+                CHECK_CLOSE_HANDLE(hDrive);
+            }
         }
 
         Log("OK\n");
@@ -2002,14 +2324,15 @@ End:
 			Log("###### [Error:] Virtual Disk Service (VDS) Unavailable ######");
 			Log("###### [Error:] Virtual Disk Service (VDS) Unavailable ######");
 		}
+
+        CHECK_CLOSE_HANDLE(hDrive);
     }
 
     if (pGptInfo)
     {
         free(pGptInfo);
     }
-
-    CHECK_CLOSE_HANDLE(hDrive);
+    
     return rc;
 }
 
@@ -2020,7 +2343,6 @@ int PartitionResizeForVentoy(PHY_DRIVE_INFO *pPhyDrive)
 	int rc = 1;
 	int PhyDrive;
 	int PartStyle;
-	INT64 ReservedValue;
 	UINT64 RecudeBytes;
 	GUID Guid;
 	MBR_HEAD MBR;
@@ -2056,13 +2378,6 @@ int PartitionResizeForVentoy(PHY_DRIVE_INFO *pPhyDrive)
 	PROGRESS_BAR_SET_POS(PT_LOCK_FOR_CLEAN);
 
 	RecudeBytes = VENTOY_EFI_PART_SIZE;
-	ReservedValue = GetReservedSpaceInMB();
-	if (ReservedValue > 0)
-	{
-		Log("Reduce add reserved space %lldMB", (LONGLONG)ReservedValue);
-		RecudeBytes += (UINT64)(ReservedValue * SIZE_1MB);
-	}
-
 
 	if (pPhyDrive->ResizeNoShrink == FALSE)
 	{
@@ -2246,30 +2561,37 @@ int PartitionResizeForVentoy(PHY_DRIVE_INFO *pPhyDrive)
 
 	Sleep(2000);
 
-	//Refresh disk list
-	PhyDrive = pPhyDrive->PhyDrive;
+    if (g_CLI_Mode)
+    {
+        Log("### Ventoy non-destructive CLI installation successfully finished.");
+    }
+    else
+    {
+        //Refresh disk list
+        PhyDrive = pPhyDrive->PhyDrive;
 
-	Log("#### Now Refresh PhyDrive ####");
-	Ventoy2DiskDestroy();
-	Ventoy2DiskInit();
-	
-	pPhyDrive = GetPhyDriveInfoByPhyDrive(PhyDrive);
-	if (pPhyDrive)
-	{
-		if (pPhyDrive->VentoyVersion[0] == 0)
-		{
-			Log("After process the Ventoy version is still invalid");
-			goto End;
-		}
+        Log("#### Now Refresh PhyDrive ####");
+        Ventoy2DiskDestroy();
+        Ventoy2DiskInit();
 
-		Log("### Ventoy non-destructive installation successfully finished <%s>", pPhyDrive->VentoyVersion);
-	}
-	else
-	{
-		Log("### Ventoy non-destructive installation successfully finished <not found>");
-	}
+        pPhyDrive = GetPhyDriveInfoByPhyDrive(PhyDrive);
+        if (pPhyDrive)
+        {
+            if (pPhyDrive->VentoyVersion[0] == 0)
+            {
+                Log("After process the Ventoy version is still invalid");
+                goto End;
+            }
 
-	InitComboxCtrl(g_DialogHwnd, PhyDrive);
+            Log("### Ventoy non-destructive installation successfully finished <%s>", pPhyDrive->VentoyVersion);
+        }
+        else
+        {
+            Log("### Ventoy non-destructive installation successfully finished <not found>");
+        }
+
+        InitComboxCtrl(g_DialogHwnd, PhyDrive);
+    }
 
 	rc = 0;
 

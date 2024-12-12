@@ -62,6 +62,8 @@
 
 #define VTOY_WARNING  "!!!!!!!!!!!!! WARNING !!!!!!!!!!!!!"
 
+#define VTOY_CHKSUM_NUM  4
+
 #define VTOY_PLAT_I386_UEFI     0x49413332
 #define VTOY_PLAT_ARM64_UEFI    0x41413634
 #define VTOY_PLAT_X86_64_UEFI   0x55454649
@@ -76,6 +78,10 @@
 #else
 #define VTOY_ARCH_CPIO  "ventoy_x86.cpio"
 #endif
+
+#define ventoy_left_key     "VTLE_LFT"
+#define ventoy_top_key      "VTLE_TOP"
+#define ventoy_color_key    "VTLE_CLR"
 
 #define ventoy_varg_4(arg) arg[0], arg[1], arg[2], arg[3]
 #define ventoy_varg_8(arg) arg[0], arg[1], arg[2], arg[3], arg[4], arg[5], arg[6], arg[7]
@@ -111,6 +117,15 @@
     {\
         s++;\
     }
+
+#define VTOY_SKIP_SPACE_NEXT_EX(s, base, initial) \
+    s = base + initial;\
+    while (ventoy_isspace(*s)) \
+    {\
+        s++;\
+    }
+
+#define VTOY_GOTO_END(v)  ret = v; goto end
 
 typedef enum VTOY_FILE_FLT
 {
@@ -624,6 +639,11 @@ typedef struct chk_case_fs_dir
 }chk_case_fs_dir;
 
 int ventoy_str_all_digit(const char *str);
+int ventoy_str_all_alnum(const char *str);
+int ventoy_str_len_alnum(const char *str, int len);
+char * ventoy_str_basename(char *path);
+grub_err_t ventoy_env_int_set(const char *name, int value);
+int ventoy_str_chrcnt(const char *str, char c);
 int ventoy_strcmp(const char *pattern, const char *str);
 int ventoy_strncmp (const char *pattern, const char *str, grub_size_t n);
 void ventoy_fill_os_param(grub_file_t file, ventoy_os_param *param);
@@ -1256,6 +1276,19 @@ typedef struct systemd_menu_ctx
     int len;
 }systemd_menu_ctx;
 
+typedef struct global_var_cfg
+{
+    const char *name;
+    const char *defval;
+    char *value;
+}global_var_cfg;
+
+typedef struct ctrl_var_cfg
+{
+    const char *name;
+    int value;
+}ctrl_var_cfg;
+
 #define vtoy_check_goto_out(p)  if (!p) goto out
 
 extern char *g_tree_script_buf;
@@ -1265,6 +1298,7 @@ extern int g_tree_view_menu_style;
 extern int g_sort_case_sensitive;
 extern int g_wimboot_enable;
 extern int g_filt_dot_underscore_file;
+extern int g_filt_trash_dir;
 extern int g_vtoy_file_flt[VTOY_FILE_FLT_BUTT];
 extern const char *g_menu_class[img_type_max];
 extern char g_iso_path[256];
@@ -1278,6 +1312,10 @@ int ventoy_plugin_load_menu_lang(int init, const char *lang);
 const char *ventoy_get_vmenu_title(const char *vMenu);
 grub_err_t ventoy_cmd_cur_menu_lang(grub_extcmd_context_t ctxt, int argc, char **args);
 extern int ventoy_menu_push_key(int code);
+int ventoy_ctrl_var_init(void);
+int ventoy_global_var_init(void);
+grub_err_t ventoy_cmd_push_menulang(grub_extcmd_context_t ctxt, int argc, char **args);
+grub_err_t ventoy_cmd_pop_menulang(grub_extcmd_context_t ctxt, int argc, char **args);
 
 #endif /* __VENTOY_DEF_H__ */
 
